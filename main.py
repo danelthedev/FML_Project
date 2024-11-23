@@ -74,3 +74,33 @@ test_df = create_dataframes(test_metadata_file, test_tsv_folder)
 # Show the resulting dataframe
 print(train_df)
 print(test_df)
+
+def predict_age(train_df, test_df):
+    # Assuming 'age' column is present in the metadata
+    # Separate the features (correlation columns) and target (age) for training
+    features = [col for col in train_df.columns if col.startswith('corr_')]  # Select correlation columns
+    X_train = train_df[features]  # Training features (correlation vectors)
+    y_train = train_df['age']  # Target variable (age)
+
+    # Initialize and train a linear regression model
+    model = LinearRegression()
+    model.fit(X_train, y_train)
+
+    # Now, let's predict the age for the test dataset
+    X_test = test_df[features]  # Test features (correlation vectors)
+    predictions = model.predict(X_test)  # Predict age for the test set
+
+    # Store the predictions with participant_id
+    predictions_df = pd.DataFrame({
+        'participant_id': test_df['participant_id'],  # Extract participant IDs
+        'age': predictions  # Predicted ages
+    })
+
+    # Save the predictions to a CSV file
+    predictions_df.to_csv('predictions.csv', index=False)
+    print("Predictions saved to 'predictions.csv'")
+
+
+# Assuming train_df and test_df are already created and contain 'age' in metadata
+# Call the function to predict age and store the predictions
+predict_age(train_df, test_df)
