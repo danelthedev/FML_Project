@@ -1,0 +1,1 @@
+{"tol": 0.0001, "penalty": "elasticnet", "loss": "huber", "learning_rate": "optimal", "l1_ratio": 0.325, "eta0": 0.7, "epsilon": 0.055, "alpha": 0.00065}

@@ -2,9 +2,9 @@ import os
 import pandas as pd
 import numpy as np
 import joblib
-from sklearn.linear_model import LinearRegression, Ridge, ElasticNet, SGDRegressor
-from sklearn.ensemble import RandomForestRegressor
-from xgboost import XGBRegressor
+from sklearn.linear_model import SGDRegressor
+from sklearn.linear_model._stochastic_gradient import DEFAULT_EPSILON
+from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import cross_val_score, GridSearchCV, RandomizedSearchCV, train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.model_selection import StratifiedKFold
@@ -51,45 +51,54 @@ def tune_and_evaluate_model(model, param_grid, X, y, scoring='neg_mean_squared_e
     """
     Perform grid search or randomized search with cross-validation.
     """
-    if search_type == 'grid':
-        search = GridSearchCV(model, param_grid, scoring=scoring, cv=cv)
-    elif search_type == 'random':
-        search = RandomizedSearchCV(model, param_grid, scoring=scoring, cv=cv, n_iter=50, random_state=42)
+    # Scale the features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
 
-    search.fit(X, y)
+    if search_type == 'grid':
+        search = GridSearchCV(model, param_grid, scoring=scoring, cv=cv, n_jobs=-1)
+    elif search_type == 'random':
+        search = RandomizedSearchCV(model, param_grid, scoring=scoring, cv=cv, n_iter=100,
+                                    random_state=42, n_jobs=-1)
+
+    search.fit(X_scaled, y)
     best_model = search.best_estimator_
     best_params = search.best_params_
     best_score = search.best_score_
 
-    return best_model, best_params, best_score
+    return best_model, best_params, best_score, scaler
 
 
 def evaluate_models(train_df):
     """
-    Evaluate multiple regression models using cross-validation and hyperparameter tuning.
+    Evaluate SGDRegressor using cross-validation and hyperparameter tuning.
     """
     features = [col for col in train_df.columns if col.startswith("corr_")]
     X = train_df[features]
     y = train_df["age"]
 
+    # Initialize SGDRegressor with reasonable defaults
     models = {
-        # "linear_regression": LinearRegression(),
-        # "ridge_regression": Ridge(),
-        "elastic_net": ElasticNet(max_iter=2000),
-        # "random_forest": RandomForestRegressor(),
-        # "xgboost": XGBRegressor()
+        "sgd_regression": SGDRegressor(max_iter=5000, random_state=42)
     }
 
+    # Comprehensive parameter grid for SGDRegressor
     param_grids = {
-        # "linear_regression": {},
-        # "ridge_regression": {"alpha": [0.1, 1, 10]},
-        "elastic_net": {"alpha": [0.075], "l1_ratio": [0.055]},
-        # "random_forest": {"n_estimators": [50, 100, 200], "max_depth": [5, 10, 20]},
-        # "xgboost": {"n_estimators": [50, 100, 200], "learning_rate": [0.01, 0.1, 0.2], "max_depth": [3, 6, 9]}
+        "sgd_regression": {
+            "loss": ["huber"],
+            "penalty": ["elasticnet"],
+            "alpha": [0.00065, 0.0006, 0.000625],
+            "learning_rate": ["optimal"],
+            "eta0": [0.045, 0.05, 0.06, 0.7],
+            "l1_ratio": [0.275, 0.3, 0.325, 0.35],
+            "epsilon": [0.05, 0.055, 0.045, 0.4, 0.6],  # for huber loss
+            "tol": [0.0001, 0.00015, 0.0002, 0.00005]
+        }
     }
 
     best_models = {}
     results = {}
+    scalers = {}
 
     # Create trained_models directory if it doesn't exist
     os.makedirs("trained_models", exist_ok=True)
@@ -97,29 +106,32 @@ def evaluate_models(train_df):
     for name, model in models.items():
         print(f"Evaluating {name}...")
 
-        best_model, best_params, best_score = tune_and_evaluate_model(
-            model, param_grids[name], X, y, search_type='grid', cv=5
+        best_model, best_params, best_score, scaler = tune_and_evaluate_model(
+            model, param_grids[name], X, y, search_type='random', cv=5
         )
 
         best_models[name] = best_model
+        scalers[name] = scaler
         results[name] = {
             "best_params": best_params,
             "best_score": best_score
         }
 
-        print(f"{name} - Best Parameters: {best_params}, Best CV Score: {best_score:.4f}")
+        print(f"{name} - Best Parameters: {best_params}")
+        print(f"{name} - Best CV Score: {best_score:.4f}")
 
-        # Save the best model
+        # Save the best model and scaler
         joblib.dump(best_model, f"trained_models/{name}_model.joblib")
+        joblib.dump(scaler, f"trained_models/{name}_scaler.joblib")
 
         # Save the model's parameters
         with open(f"trained_models/{name}_params.json", "w") as f:
             json.dump(best_params, f)
 
-    return best_models, results
+    return best_models, results, scalers
 
 
-def train_and_predict(train_df, test_df, model_name, model):
+def train_and_predict(train_df, test_df, model_name, model, scaler):
     """
     Train a model and make predictions
     """
@@ -128,9 +140,13 @@ def train_and_predict(train_df, test_df, model_name, model):
     y_train = train_df["age"]
     X_test = test_df[features]
 
+    # Scale the features
+    X_train_scaled = scaler.transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
     # Train model
-    model.fit(X_train, y_train)
-    predictions = model.predict(X_test)
+    model.fit(X_train_scaled, y_train)
+    predictions = model.predict(X_test_scaled)
 
     # Save predictions
     predictions_df = pd.DataFrame(
@@ -144,21 +160,23 @@ def load_and_predict(test_df, model_name):
     """
     Load a pre-trained model and make predictions
     """
-    # Load the trained model
     try:
+        # Load the trained model and scaler
         model = joblib.load(f"trained_models/{model_name}_model.joblib")
+        scaler = joblib.load(f"trained_models/{model_name}_scaler.joblib")
 
-        # Load model parameters (optional, for reference)
+        # Load model parameters
         with open(f"trained_models/{model_name}_params.json", "r") as f:
             model_params = json.load(f)
         print(f"Loaded {model_name} model with parameters: {model_params}")
 
-        # Prepare test features
+        # Prepare and scale test features
         features = [col for col in test_df.columns if col.startswith("corr_")]
         X_test = test_df[features]
+        X_test_scaled = scaler.transform(X_test)
 
         # Make predictions
-        predictions = model.predict(X_test)
+        predictions = model.predict(X_test_scaled)
 
         # Save predictions
         predictions_df = pd.DataFrame(
@@ -185,20 +203,13 @@ def main():
     train_df = create_dataframes(train_metadata_file, train_tsv_folder)
     test_df = create_dataframes(test_metadata_file, test_tsv_folder)
 
-    # Option 1: Train and save models
+    # Train and save models
     print("Training and saving models...")
-    best_models, cv_results = evaluate_models(train_df)
+    best_models, cv_results, scalers = evaluate_models(train_df)
 
     # Train and predict with all models
     for name, model in best_models.items():
-        train_and_predict(train_df, test_df, name, model)
-
-    # # Option 2: Load and predict with pre-trained models
-    # print("\nLoading pre-trained models and making predictions...")
-    # # model_names = ["linear_regression", "ridge_regression", "elastic_net", "random_forest", "xgboost"]
-    # model_names = ["elastic_net"]
-    # for model_name in model_names:
-    #     load_and_predict(test_df, model_name)
+        train_and_predict(train_df, test_df, name, model, scalers[name])
 
 
 if __name__ == "__main__":
